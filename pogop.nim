@@ -1,16 +1,21 @@
+
   # parsing completed, now try to process some of the info...
   # this is a bit POGO/Pokemon specific
-  
+
   # better use a stdtmpl or something like that?!?
   # if only we had a plan for what to generate, 8)
   let ofilename = filename.changeFileExt("").replace(".", "").addFileExt("nim")
   echo "Writing to: " $ofilename
   var f = open(ofilename, fmWrite)
   defer: close(f)
+
+  f.writeLine "# These could have been imports"
   for imp in pkgimports:
     f.writeLine "# import " & imp.path.changeFileExt("").replace(".", "")
+
   f.writeLine "{.push hint[XDeclaredButNotUsed]: off.}"
   f.writeLine "type"
+  # enums first
   for en in gEnums:
     # {.pure.} ?
     var enn = en.name
@@ -49,71 +54,42 @@
         if enumstable.hasKey(enn):
           f.writeLine "  " & fn & ": " & enn & " # enum too, 8)"
 
-
-  # need to resolve the order of things unless there is some sort of forward declarations...
-  # e.g. messages/struct with only native and enum fields or a proper tree'ish thing...
-  # or by package...
-  # well, a Kahn Toposort might be handy
-  # or just process one file at a time and generate Nim imports
-      
-  f.writeLine "# == message structures = " & $gMessagesUnique.high
-  var deps = newOrderedTable[string, seq[string]]()
-  for m in gMessagesUnique:
-    let mm = gMessages[m]
-    if gReqRspMsgs.find(m) > -1:
-      continue
-    let d = mm.depsList()
+  f.writeLine "# == message structures = " & $gMessages.len
+  var
+    deps = newTable[string, seq[string]]()
+    generated = newSeq[string]()
+  for k, v in gMessages:
+    let d = v.depsList()
     if d.len > 0:
-      discard deps.hasKeyOrPut(mm.name, d)
-    if d.len == 0 or mm.isNativeLike():
-      f.writeLine "# structure: " & m
-      generateMsg(mm, f)
-  for m in gMessagesUnique:
-    let mm = gMessages[m]
-    let d = mm.depsList()
-    if d.len > 0 or not isNativeLike(mm):
-      f.writeLine "# structure: " & m
-      generateMsg(mm, f)
-  echo "deps:"
-  for k,v in deps:
-    echo $k & ":" & $v
+      discard deps.hasKeyOrPut(v.name, d)
+  let topodeps = kahn_toposort(deps)
+  echo "deps:" & $topodeps
 
-  # These could probably match the RequestType enum... with an UPPER_CASE_UNDERSCORED_NAME
-  # possibly these are services?!?
-  # service SomeService {
-  #    rpc get_hatched_eggs(GetHatchedEggsMessage) returns (GetHatchedEggsResponse);
-  #    or
-  #    rpc doit(RequestEnvelope) returns (ResponseEnvelope)
-  # }
-  var it = 0
-  let requests = gReqRspMsgs.filter(proc(x: string): bool = x.endsWith("Message"))
-  if requests.len > 0:
-    f.writeLine "# reqs:" & $requests.len
-    f.writeLine "type\l  pmMessageKind = enum"
-  for m in requests:
-    # do some inflection (borrowed from Python...)
-    let urspname = m.replace("Message", "").underscore(uppercase = true)
-    let rspname = m.replace("Message", "") & "Response"    
-    f.writeLine "    pm" & m & " = (" & $it & ", \"" & m & "\") # " & urspname
-    inc(it)
-    let i = gReqRspMsgs.find(rspname)
-    if i > -1:
-      f.writeLine "    pm" & rspname & " = (" & $it & ", \"" & rspname & "\")"
-      inc(it)
+  var
+    unresolved = 0
+    gencount = 0
+  for d in topodeps:
+    let sn = d.split(".")[^1]
+    echo "# Checking: " & d
+    if enumstable.hasKey(d) or enumstable.hasKey(sn):
+      echo "# Skipping ENUM: " & d
+    elif gMessages.hasKey(d):
+      echo "# Message: " & d
+      if generated.find(d) < 0 and generated.find(sn) < 0:
+        inc(gencount)
+        generateMsg(gMessages[d], f)
+        generated &= d
+        generated &= sn
+    elif gMessages.hasKey(sn):
+      echo "# Message: " & sn
+      if generated.find(d) < 0 and generated.find(sn) < 0:
+        inc(gencount)
+        generateMsg(gMessages[sn], f)
+        generated &= d
+        generated &= sn
     else:
-      f.writeLine "    # MISSING " & rspname & " = (" & $it & ", \"" & rspname & "\")"
+      echo "# Unresolved: " & d
+      inc(unresolved)
 
-  f.writeLine "# == message/responses = " & $gReqRspMsgs.high
-  for m in requests:
-    let rspname = m.replace("Message", "") & "Response"
-    let mm = gMessages[m]
-    generateMsg(mm, f)
-
-    let i = gReqRspMsgs.find(rspname)
-    if i > -1:
-      let rm = gReqRspMsgs[i]
-      # this should work if all is well
-      let rmm = gMessages[rspname]
-      generateMsg(rmm, f)
-  f.writeLine "{.pop.}"
-  
+  f.writeLine "# Generated: " & $gencount
+  f.writeLine "# We have: " & $unresolved & " unresolved items"
