@@ -19,6 +19,10 @@ import parseutils
 import hashes
 import algorithm
 import tables
+import times
+
+import inflection
+import toposort
 
 # import protobuf
 
@@ -319,7 +323,7 @@ proc isMaptype(t: Token): bool =
 proc isGoogletype(t: Token): bool =
   # protobuf basetypes
   t.isKeyword and t.literal in GoogleTypes
-  
+
 proc isKeywords(t: Token, values: varargs[string]): bool =
   # binarySearch or in?!?
   t.kind == tkIdentifier and ProtobufKeywords.binarySearch(t.literal) > -1 and t.literal in values
@@ -403,8 +407,8 @@ type
 proc hash(pbe: ProtobufEnum): Hash =
   result = pbe.package.hash !& pbe.name.hash
   result = !$result
-    
-    
+
+
 # include "cdefines.tmpl", not here yet, oh this was for something else...
 
 type
@@ -421,7 +425,7 @@ type
 proc hash(p: ProtobufMessage): Hash =
   result = p.package.hash !& p.name.hash
   result = !$result
-    
+
 # should live in the parser, but there again...
 # These should be per package and not global...
 var
@@ -437,7 +441,7 @@ var
 let pbuf2nimMapping = {"bytes":"seq[uint8]", "string":"string", "int32":"int32", "int64":"int64",
                              "uint32":"uint32", "uint64":"uint64", "bool":"bool",
                              "double":"float64", "float":"float32", "fixed32":"int32", "fixed64":"int64"}.newTable
-            
+
 # end collection of stuff...
 
 proc parseBinInt(s: string, strict: bool = false): int {.noSideEffect, procvar, raises: [ValueError].} =
@@ -813,7 +817,7 @@ proc parseRpc(tl: seq[Token]): ParseStatus =
                     optional(tl[i] == tkSemi, i)
                     result = (true, i)
                     # could be option or empty inside curlies {}
-                
+
           echo "RPC: " & rpcname & ":" & rpcmsg & ", s:" & $rpcstream & ", " & retmsg & ", s:" & $retstream
 
 proc parseService(tl: seq[Token]): ParseStatus =
@@ -884,24 +888,26 @@ proc parseOption(tl: seq[Token]): ParseStatus =
             result = (true, i)
 
 proc depsList(m: ProtobufMessage): seq[string] =
+  ## This is a bloody mess
   result = newSeq[string]()
   for v in m.fields.values:
+    let dots = v.fieldtype.count(".")
     if pbuf2nimMapping.hasKey(v.fieldtype):
+      # native type
       continue
-    elif enumstable.hasKey(v.fieldtype):
+    elif enumstable.hasKey(v.fieldtype) or v.fieldtype.find(".Enums.") > -1:
+      # an enum
       continue
-    elif v.fieldtype.count(".") > 0:
-      let enn = v.fieldtype.split('.')[^2..^1].join("")
-      if enumstable.hasKey(enn):
-        continue
-      elif v.fieldtype.find(".Enums.") < 0:
-        result.add(v.fieldtype)
-      else:
-        result.add(v.fieldtype)
+    elif dots > 0:
+      let sn = v.fieldtype.split('.')[^1]
+      result.add(sn)
+      # let enn = v.fieldtype.split('.')[^2..^1].join("")
+      # result.add(enn)
+      # result.add(v.fieldtype)
     else:
       result.add(v.fieldtype)
   return result
-     
+
 proc isNativeLike(m: ProtobufMessage): bool =
   for v in m.fields.values:
     let en = v.fieldtype.split('.')[^1]
@@ -923,7 +929,7 @@ proc isNativeLike(m: ProtobufMessage): bool =
       result = false
       break
   return result
-    
+
 # "ident:" & fieldtype & ":" & fieldname & ":" & fieldval & ", repeated:" & $repeated & ", packed:" $packed
 # field = [ "repeated" ] type fieldName "=" fieldNumber [ "[" fieldOptions "]" ] ";"
 # messageBody = "{" { field | enum | message | option | oneof | mapField | reserved | emptyStatement
@@ -941,15 +947,17 @@ proc parseMessage(tl: seq[Token], owner: string = "", level: int = 1): ParseStat
   if consume(tl[i] === "message", ok, i):
     if tl[i].isIdentifier:
       mname = tl[i].literal
-      msg.name = mname
       echo ">> MESSAGE[" & $level & "]: " & $mname
       if owner.len == 0:
         unique = mname notin gMessagesUnique
         if mname.endsWith("Message") or mname.endsWith("Response"):
           gReqRspMsgs &= mname
           rr = true
+        if not unique:
+          mname = owner & mname
       if unique and not rr:
         gMessagesUnique &= mname
+      msg.name = mname
       inc(i)
       if consume(tl[i] == tkLcurly, ok, i):
         # now any: enum, message, option, oneof, field, mapField, reserved, emptyStatement
@@ -1290,7 +1298,7 @@ proc lexit(parser: var Parser): ParseStatus =
   let error = any(parser.tokens, proc (x: Token): bool = result = x == tkError)
   echo ">>" & $location & ":" $t
   result = ((not error, parser.tokens.len))
-  
+
 proc parse(parser: var Parser): ParseStatus =
   # Analyze "stream" of tokens
   var
@@ -1384,9 +1392,7 @@ proc parse(parser: var Parser): ParseStatus =
   echo "ALL IMPORTS: " & $pkgimports.len & "->" & $pkgimports
   result = (status: true, consumed: cur)
 
-  
-import inflection  
-import times
+
 if isMainModule:
   var filename: string = "conformance.proto"
   var maxiter: int = 1
@@ -1410,4 +1416,3 @@ if isMainModule:
     let elapsed = cpuTime() - t1
     writeLine stderr, "Successful:", $successful, ", elapsed ", $elapsed, ", ",  $(elapsed / maxiter.float)
   echo $GC_getStatistics()
-
