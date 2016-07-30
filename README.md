@@ -6,5 +6,7 @@ Learning Nim, saving the source...
 
 `protocnim.nim` an experimental [Google Protobuf IDL][2] lexer/parser.
 
+`pogop.nim` append to `protocnim.nim` and it does some rudimentary code generation.
+
 [1]: https://github.com/jpvanhal/inflection
 [2]: https://developers.google.com/protocol-buffers/
