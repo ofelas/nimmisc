@@ -1,1 +1,3 @@
-# nimmisc
+# Misc Nim notes and jottings
+
+Learning Nim, saving the source...
