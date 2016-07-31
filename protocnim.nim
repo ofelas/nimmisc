@@ -413,14 +413,59 @@ proc hash(pbe: ProtobufEnum): Hash =
 # include "cdefines.tmpl", not here yet, oh this was for something else...
 
 type
-  ProtobufSyntax = string
+  ProtobufOptionKind = enum
+    oIdentifier,
+    oString,
+    oInt,
+    oFloat,
+    oBool
+  ProtobufOption = object
+    name: string
+    literal: string
+    #location: Location?!?
+    case kind: ProtobufOptionKind
+    of oIdentifier, oString:
+      discard                   # using literal
+    of oInt:
+      intVal: int
+    of oFloat:
+      floatVal: float
+    of oBool:
+      boolVal: bool
+
+proc newProtobufOption(name: string, t: Token): ProtobufOption =
+  ## Make name and token into a ProtobufOption
+  case t.kind
+  of tkIdentifier:
+    if t.literal == "true":
+      result = ProtobufOption(name: name, kind: oBool, literal: t.literal, boolVal: true)
+    elif t.literal == "false":
+      result = ProtobufOption(name: name, kind: oBool, literal: t.literal, boolVal: false)
+    else:
+      result = ProtobufOption(name: name, kind: oIdentifier, literal: t.literal)
+  of tkString:
+    result = ProtobufOption(name: name, kind: oString, literal: t.literal)
+  of tkInt:
+    result = ProtobufOption(name: name, kind: oInt, literal: t.literal, intVal: t.intVal)
+  of tkFloat:
+    result = ProtobufOption(name: name, kind: oFloat, literal: t.literal, floatVal: t.floatVal)
+  else:
+    echo "Cannot translate " & $t & " to a ProtobufOption"
+
+
+type
+  ProtobufSyntax = string       # in case we want to be more specific
   ProtobufPackage = string      # this could be a container for all other stuff...
-  ProtobufImport = tuple[path: string, style: string]
+  ProtobufImportKind = enum
+    iNone,
+    iWeak,
+    iPublic
+  ProtobufImport = tuple[path: string, style: ProtobufImportKind]
   ProtobufField = tuple[fieldname, fieldtype, fieldval: string, repeated, packed: bool]
   ProtobufMessage = object
     name: string
     package: string
-    # fields OrderedTable of something
+    options: OrderedTable[string, ProtobufOption]
     fields: OrderedTable[string, ProtobufField]
 
 proc hash(p: ProtobufMessage): Hash =
@@ -428,7 +473,7 @@ proc hash(p: ProtobufMessage): Hash =
   result = !$result
 
 # should live in the parser, but there again...
-# These should be per package and not global...
+# These should be per package and not global or something...
 var
   gEnums =  newSeq[ProtobufEnum]()
   gEnumsUnique = newSeq[string]()
@@ -548,7 +593,7 @@ proc parseTypeAnnotations(tl: seq[Token]): TypeAnnotations =
     result.res.status = true
     result.res.consumed = i
 
-proc parseEnum(tl: seq[Token], owner: string = ""): ParseStatus =
+proc parseEnum(tl: seq[Token], owner: string = ""): (ParseStatus, ProtobufEnum) =
   # should return the name and list of values, ProtobufEnum thingy
   # get rid of the gEnum... variables
   var
@@ -618,8 +663,7 @@ proc parseEnum(tl: seq[Token], owner: string = ""): ParseStatus =
         # ends with a '}'
         if consume(tl[i] == tkRcurly, ok, i):
           # the first enum value should be 0 as per protobuf requirements...
-          gEnums &= enumdef
-          result = (true, i)
+          result = ((true, i), enumdef)
 
 # field type
 proc parseFieldType(tl: seq[Token]): (bool, int, string) =
@@ -786,7 +830,7 @@ proc parseOneof(tl: seq[Token]): ParseStatus =
 # rpc = "rpc" rpcName "(" [ "stream" ] messageType ")" "returns" "(" [ "stream" ]
 #       messageType ")" (( "{" {option | emptyStatement } "}" ) | ";")
 
-proc parseOption(tl: seq[Token]): ParseStatus # ah, forward decl
+proc parseOption(tl: seq[Token]): (ParseStatus, ProtobufOption) # ah, forward decl
 
 proc parseRpc(tl: seq[Token]): ParseStatus =
   ## this is thrift at the moment
@@ -847,8 +891,9 @@ proc parseService(tl: seq[Token]): ParseStatus =
           if tl[i] == tkSemi:
             inc(i)
           elif tl[i] === "option":
-            let ps = parseOption(tl[i..^1])
+            let (ps, opt) = parseOption(tl[i..^1])
             if ps.status:
+              echo "OPTION: " & $opt
               inc(i, ps.consumed)
           elif tl[i] === "rpc":
             let ps = parseRpc(tl[i..^1])
@@ -865,34 +910,46 @@ proc parseService(tl: seq[Token]): ParseStatus =
             if ta.len > 0: echo "TA: " & $ta
             result[1] = i
 
+# constant = fullIdent | ( [ "-" | "+" ] intLit ) | ( [ "-" | "+" ] floatLit ) | strLit | boolLit
 # option = "option" optionName  "=" constant ";"
 # optionName = ( ident | "(" fullIdent ")" ) { "." ident }
-proc parseOption(tl: seq[Token]): ParseStatus =
+proc parseOption(tl: seq[Token]): (ParseStatus, ProtobufOption) =
+  ## this needs a better ProtobufOption
   var
     i = 0
     ok = false
-    oname: string = ""
-    oconstant: string = ""
+    haveparen = false
+    havedot = false
+    step = 0
+    name: string = ""
   inc(i, consumeComments(tl[i..^1]))
-  result.consumed = i
+  result[0].consumed = i
   if consume(tl[i] === "option", ok, i):
-    if consume(tl[i] == tkDot, ok, i):
-      discard
-    elif consume(tl[i] == tkLparen, ok, i):
-      discard
-    else:
-      if tl[i].isIdentifier:
-        oname = tl[i].literal
-        inc(i)
-        ok = true
+    if consume(tl[i] == tkLparen, ok, i):
+      haveparen = true
+    # this should include an identifier starting with a dot
+    if tl[i] == tkDot:
+      inc(i)
+      havedot = true
+    (ok, name, step) = dottedIdentifier(tl[i..i+2])
     if ok:
+      inc(i, step)
+      if havedot:
+        if name.startsWith("."):
+          echo "Double dotted ignored"
+        else:
+          name = "." & name
+      if haveparen:
+        # must have an tkRparen, which we assume is here and skip for now
+        inc(i)
       if consume(tl[i] == tkAssign, ok, i):
-        if tl[i] in {tkString, tkIdentifier}:
-          oconstant = tl[i].literal
+        if tl[i] in {tkString, tkIdentifier, tkInt, tkFloat}:
+          # just pick up the literal for now
+          let opt = newProtobufOption(name, tl[i])
           inc(i)
           if consume(tl[i] == tkSemi, ok, i):
-            echo "OPTION: " & oname & ":" & oconstant
-            result = (true, i)
+            echo "OPTION: " & $opt
+            result = ((true, i), opt)
 
 proc depsList(m: ProtobufMessage): seq[string] =
   ## This is a bloody mess
@@ -948,7 +1005,9 @@ proc parseMessage(tl: seq[Token], owner: string = "", level: int = 1): ParseStat
     unique = false
     rr = false
     mname: string = ""
-    msg = ProtobufMessage(name: "", package: gCurrentPackage, fields: initOrderedTable[string, ProtobufField]())
+    msg = ProtobufMessage(name: "", package: gCurrentPackage,
+                          options: initOrderedTable[string, ProtobufOption](),
+                          fields: initOrderedTable[string, ProtobufField]())
   inc(i, consumeComments(tl[i..^1]))
   result.consumed = i
   if consume(tl[i] === "message", ok, i):
@@ -981,9 +1040,10 @@ proc parseMessage(tl: seq[Token], owner: string = "", level: int = 1): ParseStat
             if ok:
               inc(i, ps.consumed)
           elif tl[i] === "enum":
-            let ps = parseEnum(tl[i..^1], mname)
+            let (ps, pben) = parseEnum(tl[i..^1], mname)
             ok = ps.status
             if ok:
+              gEnums &= pben
               inc(i, ps.consumed)
           elif tl[i] === "oneof":
             let ps = parseOneof(tl[i..^1])
@@ -991,9 +1051,11 @@ proc parseMessage(tl: seq[Token], owner: string = "", level: int = 1): ParseStat
             if ok:
               inc(i, ps.consumed)
           elif tl[i] === "option":
-            let ps = parseOption(tl[i..^1])
+            let (ps, opt) = parseOption(tl[i..^1])
             ok = ps.status
             if ok:
+              echo "OPTION: " & $opt
+              discard msg.options.hasKeyOrPut(opt.name, opt)
               inc(i, ps.consumed)
           elif tl[i] === "extend":
             echo "Skipping NOT implemented: " & $tl[i].literal
@@ -1095,12 +1157,15 @@ proc parseImport(tl: seq[Token]): (ParseStatus, ProtobufImport) =
     i = 0
     ok = false
     iname: string = ""
-    istyle: string = ""
+    istyle: ProtobufImportKind = iNone
   inc(i, consumeComments(tl[i..^1]))
   result[0].consumed = i
   if consume(tl[i] === "import", ok, i):
     if tl[i].isKeywords("weak", "public"):
-      istyle = tl[i].literal
+      if tl[i].literal == "weak":
+        istyle = iWeak
+      else:
+        istyle = iPublic
       inc(i)
     if tl[i] == tkString:
       iname = tl[i].literal
@@ -1347,8 +1412,9 @@ proc parse(parser: var Parser): ParseStatus =
         inc(cur, ps.consumed)
         continue
     elif it === "option":
-      ps = parseOption(parser.tokens[cur..^1])
-      echo "option:" & $ps
+      var opt: ProtobufOption
+      (ps, opt) = parseOption(parser.tokens[cur..^1])
+      echo "option:" & $ps & ":" & $opt
       if ps.status:
         inc(cur, ps.consumed)
         continue
@@ -1369,9 +1435,11 @@ proc parse(parser: var Parser): ParseStatus =
         inc(cur, ps.consumed)
         continue
     elif it === "enum":
-      ps = parseEnum(parser.tokens[cur..^1], "") # GPK? Global PoKemon, 8)
+      var pben: ProtobufEnum
+      (ps, pben) = parseEnum(parser.tokens[cur..^1], "") # GPK? Global PoKemon, 8)
       echo "enum:" & $ps
       if ps.status:
+        gEnums &= pben
         inc(cur, ps.consumed)
         continue
     elif it === "oneof":
@@ -1423,4 +1491,3 @@ if isMainModule:
     let elapsed = cpuTime() - t1
     writeLine stderr, "Successful:", $successful, ", elapsed ", $elapsed, ", ",  $(elapsed / maxiter.float)
   echo $GC_getStatistics()
-

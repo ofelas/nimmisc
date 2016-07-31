@@ -1,4 +1,5 @@
-  # pogop.nim  
+
+  # pogop.nim
   # parsing completed, now try to process some of the info...
   # this is a bit POGO/Pokemon specific
 
@@ -25,7 +26,9 @@
     f.writeLine "  " & en.name & "* {.pure.} = enum"
     discard enumstable.hasKeyOrPut(en.name, en)
     # NOTE: enum values must have proper order/be sorted in Nim
-    # it may be better to make a Nim ProtobufEnum thingy
+    #
+    # it may be better to make a Nim ProtobufEnum thingy or look at
+    # the generated Python code and all the extra meta data
     for e, v in en.values.pairs:
       # want a camelize style renaming like Python inflection
       f.writeLine "    " & e & " = (" & $v & ", \"" & camelize(e) & "\")"
