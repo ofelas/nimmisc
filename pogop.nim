@@ -1,4 +1,4 @@
-
+  # pogop.nim  
   # parsing completed, now try to process some of the info...
   # this is a bit POGO/Pokemon specific
 
@@ -22,8 +22,8 @@
     if not en.unique:
       enn = en.package.replace(".", "") & enn
     f.writeLine "\l  # " & en.package & ":" & en.name & ", unique:" & $en.unique
-    f.writeLine "  " & enn & " {.pure.} = enum"
-    discard enumstable.hasKeyOrPut(enn, en)
+    f.writeLine "  " & en.name & "* {.pure.} = enum"
+    discard enumstable.hasKeyOrPut(en.name, en)
     # NOTE: enum values must have proper order/be sorted in Nim
     # it may be better to make a Nim ProtobufEnum thingy
     for e, v in en.values.pairs:
@@ -31,13 +31,20 @@
       f.writeLine "    " & e & " = (" & $v & ", \"" & camelize(e) & "\")"
 
   proc generateMsg(m: ProtobufMessage, f: File) =
+    ## This does miss a few fields like nested enums and the like...
     f.writeLine "# Message: " & m.name & "[" & m.package & "]"
-    f.writeLine "type " & m.name & " = object"
+    f.writeLine "type " & m.name & "* = object"
+    var ln: string = ""
     for v in m.fields.values:
+      let dots = v.fieldtype.count('.')
       let en = v.fieldtype.split('.')[^1]
       var fn = v.fieldname
       if fn in NimKeywords:
-        fn &= "x"
+        fn &= "_unnimmed"
+      if dots > 2:
+        ln = v.fieldtype.split(".")[^2..^1].join("")
+      else:
+        ln = v.fieldtype.replace(".", "")
       f.writeLine "  #  " & $v
       if pbuf2nimMapping.hasKey(v.fieldtype):
         let t = pbuf2nimMapping[v.fieldtype]
@@ -45,14 +52,31 @@
           f.writeLine "  " & fn & ": seq[" & t & "]"
         else:
           f.writeLine "  " & fn & ": " & t
+      elif enumstable.hasKey(ln):
+        if v.repeated:
+          f.writeLine "  " & fn & ": seq[" & ln & "] # repeated enum"
+        else:
+          f.writeLine "  " & fn & ": " & ln & " # enum"
       elif enumstable.hasKey(en):
-        f.writeLine "  " & fn & ": " & en & " # enum, 8)"
+        if v.repeated:
+          f.writeLine "  " & fn & ": seq[" & en & "] # repeated enum"
+        else:
+          f.writeLine "  " & fn & ": " & en & " # enum"
+      elif enumstable.hasKey(v.fieldtype):
+        f.writeLine "  " & fn & ": " & v.fieldtype & " # enum, 8)"
       elif gMessages.hasKey(en):
-        f.writeLine "  " & fn & ": " & en & " # message/struct, 8)"
+        if v.repeated:
+          f.writeLine "  " & fn & ": seq[" & en & "] # repeated message/struct, 8)"
+        else:
+          f.writeLine "  " & fn & ": " & en & " # message/struct, 8)"
       elif v.fieldtype.count(".") > 0:
         let enn = v.fieldtype.split('.')[^2..^1].join("")
         if enumstable.hasKey(enn):
           f.writeLine "  " & fn & ": " & enn & " # enum too, 8)"
+        else:
+          f.writeLine "  " & fn & ": " & enn & " # guessing, 8)"
+      else:
+        f.writeLine "  " & fn & ": " & en & " # unresolved"
 
   f.writeLine "# == message structures = " & $gMessages.len
   var
@@ -66,7 +90,7 @@
   echo "deps:" & $topodeps
 
   var
-    unresolved = 0
+    unresolved = newSeq[string]()
     gencount = 0
   for d in topodeps:
     let sn = d.split(".")[^1]
@@ -89,7 +113,9 @@
         generated &= sn
     else:
       echo "# Unresolved: " & d
-      inc(unresolved)
+      unresolved &= d
 
   f.writeLine "# Generated: " & $gencount
-  f.writeLine "# We have: " & $unresolved & " unresolved items"
+  f.writeLine "# We have: " & $unresolved.len & " unresolved items"
+  for u in unresolved:
+    f.writeLine "# " & u

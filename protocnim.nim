@@ -401,11 +401,12 @@ type
   ProtobufEnum = object
     name: string
     package: string
+    parent: string
     unique: bool
     values: OrderedTable[string, int]
 
 proc hash(pbe: ProtobufEnum): Hash =
-  result = pbe.package.hash !& pbe.name.hash
+  result = pbe.package.hash !& pbe.name.hash !& pbe.parent.hash
   result = !$result
 
 
@@ -555,8 +556,9 @@ proc parseEnum(tl: seq[Token], owner: string = ""): ParseStatus =
     ok = false
     ident: string = ""
     step = 0
-    enumdef = ProtobufEnum(name: "", package: gCurrentPackage, unique: false, values: initOrderedTable[string, int]())
+    enumdef = ProtobufEnum(name: "", package: gCurrentPackage, parent: owner, unique: false, values: initOrderedTable[string, int]())
     revvalues = initOrderedTable[int, string]()
+    longname: string = ""
   inc(i, consumeComments(tl[i..^1]))
   if consume(tl[i] === "enum", ok, i):
     (ok, ident, step) = dottedIdentifier(tl[i..i+2])
@@ -566,12 +568,17 @@ proc parseEnum(tl: seq[Token], owner: string = ""): ParseStatus =
       if consume(tl[i] == tkLcurly, ok, i):
         # consume the fields: NAME = value | NAME
         # This should probably be something scope like...
-        let longname = owner & ident
-        ident = longname
+        if owner.count('.') > 0:
+          longname = owner.split(".")[^1] & ident
+        else:
+          longname = owner & ident
         echo "ENUM[" & gCurrentPackage & "] " & longname
-        let unique = longname notin gEnumsUnique
+        let unique = ident notin gEnumsUnique
         if unique:
-          gEnumsUnique &= longname
+          gEnumsUnique &= ident
+        else:
+          ident = longname
+          gEnumsUnique &= ident
         enumdef.name = ident
         enumdef.unique = unique
         # now parse the individual fields
@@ -1416,3 +1423,4 @@ if isMainModule:
     let elapsed = cpuTime() - t1
     writeLine stderr, "Successful:", $successful, ", elapsed ", $elapsed, ", ",  $(elapsed / maxiter.float)
   echo $GC_getStatistics()
+
