@@ -1,4 +1,3 @@
-
   # pogop.nim
   # parsing completed, now try to process some of the info...
   # this is a bit POGO/Pokemon specific
@@ -23,15 +22,22 @@
     if not en.unique:
       enn = en.package.replace(".", "") & enn
     f.writeLine "\l  # " & en.package & ":" & en.name & ", unique:" & $en.unique
-    f.writeLine "  " & en.name & "* {.pure.} = enum"
+    let un = en.name.underscore(true) & "_"
+    f.writeLine "  " & en.name & "* {.pure.} = enum #" & un
     discard enumstable.hasKeyOrPut(en.name, en)
-    # NOTE: enum values must have proper order/be sorted in Nim
+    # NOTE: enum values must have proper order/be sorted in Nim it seems
     #
     # it may be better to make a Nim ProtobufEnum thingy or look at
-    # the generated Python code and all the extra meta data
-    for e, v in en.values.pairs:
+    # the generated Python code and all the extra meta data for ideas
+    var n: string
+    for e, v in en.values:
+      # replace potential common prefix, better to edit the proto file...
+      if e.startsWith(un):
+        n = e.replace(un, "")
+      else:
+        n = e
       # want a camelize style renaming like Python inflection
-      f.writeLine "    " & e & " = (" & $v & ", \"" & camelize(e) & "\")"
+      f.writeLine "    " & n & " = (" & $v & ", \"" & camelize(n) & "\")"
 
   proc generateMsg(m: ProtobufMessage, f: File) =
     ## This does miss a few fields like nested enums and the like...

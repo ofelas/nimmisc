@@ -103,9 +103,10 @@ const
 
 const
   # previously ThriftKeywords, now in a flux
-  ProtobufKeywords : array[0..36, string] = [
+  ProtobufKeywords : array[0..37, string] = [
     "bool",
     "bytes",
+    "default",
     "double",
     "enum",
     "extend",
@@ -390,6 +391,11 @@ const
   HexChars = {'0' .. '9', 'a' .. 'f', 'A' .. 'F'}
   IdentifierChars = {'0' .. '9', 'a' .. 'z', 'A' .. 'Z', '_', '.'}
 
+
+let pbuf2nimMapping = {"bytes":"seq[uint8]", "string":"string", "int32":"int32", "int64":"int64",
+                        "uint32":"uint32", "uint64":"uint64", "bool":"bool",
+                        "double":"float64", "float":"float32", "fixed32":"int32", "fixed64":"int64"}.newTable
+
 # some remains from some Thrift parsing...
 type
   ParseStatus = tuple[status: bool, consumed: int]
@@ -452,21 +458,33 @@ proc newProtobufOption(name: string, t: Token): ProtobufOption =
   else:
     echo "Cannot translate " & $t & " to a ProtobufOption"
 
-
 type
-  ProtobufSyntax = string       # in case we want to be more specific
+  ProtobufSyntax = tuple[name:string, valid: bool]       # in case we want to be more specific
   ProtobufPackage = string      # this could be a container for all other stuff...
   ProtobufImportKind = enum
     iNone,
     iWeak,
     iPublic
-  ProtobufImport = tuple[path: string, style: ProtobufImportKind]
-  ProtobufField = tuple[fieldname, fieldtype, fieldval: string, repeated, packed: bool]
+  ProtobufImport = tuple[name, path: string, style: ProtobufImportKind, valid: bool]
+  ProtobufItemField = tuple[fieldname, fieldtype, fieldval: string, required: bool,
+                            repeated, packed: bool, options: OrderedTable[string, string]]
   ProtobufMessage = object
     name: string
     package: string
     options: OrderedTable[string, ProtobufOption]
-    fields: OrderedTable[string, ProtobufField]
+    fields: OrderedTable[string, ProtobufItemField]
+
+  # toplevel: empty, message, enum, service, extend, import, package, option
+  ProtobufField = ref ProtobufFieldObj
+  ProtobufFieldObj = object
+    name: string
+  ProtobufSpec = ref object of RootObj
+    syntax: ProtobufSyntax       # just 1
+    package: ProtobufPackage    # just 1
+    options: OrderedTable[string, ProtobufOption] # 0..n
+    imports: seq[ProtobufImport] # assuming 0..n
+    definitions: seq[ProtobufField] # 0..n
+
 
 proc hash(p: ProtobufMessage): Hash =
   result = p.package.hash !& p.name.hash
@@ -484,9 +502,48 @@ var
   pkgimports = newSeq[ProtobufImport]()
   gCurrentPackage: string = ""
 
-let pbuf2nimMapping = {"bytes":"seq[uint8]", "string":"string", "int32":"int32", "int64":"int64",
-                             "uint32":"uint32", "uint64":"uint64", "bool":"bool",
-                             "double":"float64", "float":"float32", "fixed32":"int32", "fixed64":"int64"}.newTable
+proc depsList(m: ProtobufMessage): seq[string] =
+  ## This is a bloody mess, produce a list of dependencides for a message
+  result = newSeq[string]()
+  for v in m.fields.values:
+    let dots = v.fieldtype.count(".")
+    if pbuf2nimMapping.hasKey(v.fieldtype):
+      # native type
+      continue
+    elif enumstable.hasKey(v.fieldtype) or v.fieldtype.find(".Enums.") > -1:
+      # an enum
+      continue
+    elif dots > 0:
+      let sn = v.fieldtype.split('.')[^1]
+      result.add(sn)
+      # let enn = v.fieldtype.split('.')[^2..^1].join("")
+      # result.add(enn)
+      # result.add(v.fieldtype)
+    else:
+      result.add(v.fieldtype)
+  return result
+
+proc isNativeLike(m: ProtobufMessage): bool =
+  for v in m.fields.values:
+    let en = v.fieldtype.split('.')[^1]
+    if pbuf2nimMapping.hasKey(v.fieldtype):
+      result = true
+    elif enumstable.hasKey(en):
+      result = true
+    elif gMessages.hasKey(en):
+      result = false
+      break
+    elif v.fieldtype.count(".") > 0:
+      let enn = v.fieldtype.split('.')[^2..^1].join("")
+      if enumstable.hasKey(enn):
+        result = true
+      else:
+        result = false
+        break
+    else:
+      result = false
+      break
+  return result
 
 # end collection of stuff...
 
@@ -601,7 +658,8 @@ proc parseEnum(tl: seq[Token], owner: string = ""): (ParseStatus, ProtobufEnum) 
     ok = false
     ident: string = ""
     step = 0
-    enumdef = ProtobufEnum(name: "", package: gCurrentPackage, parent: owner, unique: false, values: initOrderedTable[string, int]())
+    enumdef = ProtobufEnum(name: "", package: gCurrentPackage, parent: owner,
+                           unique: false, values: initOrderedTable[string, int]())
     revvalues = initOrderedTable[int, string]()
     longname: string = ""
   inc(i, consumeComments(tl[i..^1]))
@@ -663,6 +721,7 @@ proc parseEnum(tl: seq[Token], owner: string = ""): (ParseStatus, ProtobufEnum) 
         # ends with a '}'
         if consume(tl[i] == tkRcurly, ok, i):
           # the first enum value should be 0 as per protobuf requirements...
+          enumdef.values.sort(proc(x,y:(string, int)): int = result = cmp(x[1], y[1]))
           result = ((true, i), enumdef)
 
 # field type
@@ -726,6 +785,7 @@ proc parseFieldType(tl: seq[Token]): (bool, int, string) =
         result[0] = true
         result[1] = i
 
+# must return what was parsed
 proc parseFieldList(tl: seq[Token], start: TokenKind = tkLcurly, stop: TokenKind = tkRcurly ): (bool, int) =
   var
     i = 0
@@ -797,6 +857,9 @@ proc parseFieldList(tl: seq[Token], start: TokenKind = tkLcurly, stop: TokenKind
   else:
     result = (true, i)
 
+# * oneof = "oneof" oneofName "{" { oneofField | emptyStatement } "}"
+# * oneofField = type fieldName "=" fieldNumber [ "[" fieldOptions "]" ] ";"
+# need to return something, oneOf is like a union...
 proc parseOneof(tl: seq[Token]): ParseStatus =
   var i = 0
   let comments = consumeComments(tl[i..^1])
@@ -832,6 +895,7 @@ proc parseOneof(tl: seq[Token]): ParseStatus =
 
 proc parseOption(tl: seq[Token]): (ParseStatus, ProtobufOption) # ah, forward decl
 
+# must return what was parsed
 proc parseRpc(tl: seq[Token]): ParseStatus =
   ## this is thrift at the moment
   var
@@ -871,6 +935,7 @@ proc parseRpc(tl: seq[Token]): ParseStatus =
 
           echo "RPC: " & rpcname & ":" & rpcmsg & ", s:" & $rpcstream & ", " & retmsg & ", s:" & $retstream
 
+# must retuurn what was parsed
 proc parseService(tl: seq[Token]): ParseStatus =
   ## this is thrift at the moment
   var
@@ -951,53 +1016,46 @@ proc parseOption(tl: seq[Token]): (ParseStatus, ProtobufOption) =
             echo "OPTION: " & $opt
             result = ((true, i), opt)
 
-proc depsList(m: ProtobufMessage): seq[string] =
-  ## This is a bloody mess
-  result = newSeq[string]()
-  for v in m.fields.values:
-    let dots = v.fieldtype.count(".")
-    if pbuf2nimMapping.hasKey(v.fieldtype):
-      # native type
-      continue
-    elif enumstable.hasKey(v.fieldtype) or v.fieldtype.find(".Enums.") > -1:
-      # an enum
-      continue
-    elif dots > 0:
-      let sn = v.fieldtype.split('.')[^1]
-      result.add(sn)
-      # let enn = v.fieldtype.split('.')[^2..^1].join("")
-      # result.add(enn)
-      # result.add(v.fieldtype)
-    else:
-      result.add(v.fieldtype)
-  return result
-
-proc isNativeLike(m: ProtobufMessage): bool =
-  for v in m.fields.values:
-    let en = v.fieldtype.split('.')[^1]
-    if pbuf2nimMapping.hasKey(v.fieldtype):
-      result = true
-    elif enumstable.hasKey(en):
-      result = true
-    elif gMessages.hasKey(en):
-      result = false
-      break
-    elif v.fieldtype.count(".") > 0:
-      let enn = v.fieldtype.split('.')[^2..^1].join("")
-      if enumstable.hasKey(enn):
-        result = true
-      else:
-        result = false
+proc parseFieldOptions(tl: seq[Token]): (ParseStatus, OrderedTable[string, string]) =
+  var
+    i = 0
+    ok = false
+    step = 0
+    ident = ""
+    value = ""
+  result[1] = initOrderedTable[string, string]()
+  inc(i, consumeComments(tl[i..^1]))
+  if consume(tl[i] == tkLsquare, ok, i):
+    while ok:
+      if tl[i] == tkRsquare:
+        inc(i)
+        result[0] = (true, i)
         break
-    else:
-      result = false
-      break
-  return result
+      else:
+        if tl[i] == tkIdentifier:
+          (ok, ident, step) = dottedIdentifier(tl[i..i+2])
+          if ok:
+            inc(i, step)
+            if consume(tl[i] == tkAssign, ok, i):
+              if tl[i] in {tkInt, tkFloat, tkIdentifier}:
+                value = tl[i].literal
+                inc(i)
+                if result[1].hasKeyOrPut(ident, value):
+                  echo "duplicate option:" & ident & "=" & value
+            else:
+              echo "missing assignment"
+        else:
+          ok = false
+      inc(i, consumeComments(tl[i..^1]))
+      if ok and tl[i] == tkComma:
+        inc(i)
 
 # "ident:" & fieldtype & ":" & fieldname & ":" & fieldval & ", repeated:" & $repeated & ", packed:" $packed
 # field = [ "repeated" ] type fieldName "=" fieldNumber [ "[" fieldOptions "]" ] ";"
 # messageBody = "{" { field | enum | message | option | oneof | mapField | reserved | emptyStatement
 # message = "message" messageName messageBody
+
+# must return what was parsed instead of messing with globals
 proc parseMessage(tl: seq[Token], owner: string = "", level: int = 1): ParseStatus =
   var
     i = 0
@@ -1007,7 +1065,7 @@ proc parseMessage(tl: seq[Token], owner: string = "", level: int = 1): ParseStat
     mname: string = ""
     msg = ProtobufMessage(name: "", package: gCurrentPackage,
                           options: initOrderedTable[string, ProtobufOption](),
-                          fields: initOrderedTable[string, ProtobufField]())
+                          fields: initOrderedTable[string, ProtobufItemField]())
   inc(i, consumeComments(tl[i..^1]))
   result.consumed = i
   if consume(tl[i] === "message", ok, i):
@@ -1113,6 +1171,7 @@ proc parseMessage(tl: seq[Token], owner: string = "", level: int = 1): ParseStat
               repeated = true
               inc(i)
             if tl[i].isKeywords("optional", "required"):
+              # need to do something with required
               required = tl[i].literal == "required"
               inc(i)
             fieldtype = tl[i].literal
@@ -1123,22 +1182,18 @@ proc parseMessage(tl: seq[Token], owner: string = "", level: int = 1): ParseStat
               fieldval = tl[i].literal
               inc(i)
               # fieldOptions?
-              if tl[i] == tkLsquare:
-                # consume until tkRsquare, these may be packed hints for repeated fields...
-                inc(i)
-                if tl[i].literal == "packed":
-                  inc(i)
-                  if tl[i] == tkAssign and tl[i+1] === "true":
-                    packed = true
-                while true:
-                  if tl[i] == tkRsquare:
-                    inc(i)
-                    break
-                  else:
-                    inc(i)
+              let (ps, fieldoptions) = parseFieldOptions(tl[i..^1])
+              inc(i, ps.consumed)
+              if ps.status:
+                if fieldoptions.hasKey("packed"):
+                  packed = fieldoptions["packed"] == "true"
               if consume(tl[i] == tkSemi, ok, i):
-                discard msg.fields.hasKeyOrPut(fieldname, (fieldname: fieldname, fieldtype: fieldtype, fieldval: fieldval, repeated: repeated, packed: packed))
-                echo "ident:" & fieldtype & ":" & fieldname & ":" & fieldval & ", repeated:" & $repeated & ", packed:" & $packed
+                let f = (fieldname: fieldname, fieldtype: fieldtype,
+                         fieldval: fieldval, required: required,
+                         repeated: repeated,
+                         packed: packed, options: fieldoptions)
+                discard msg.fields.hasKeyOrPut(fieldname, f)
+                echo "ident:" & $f
           elif tl[i] == tkRcurly:
             inc(i)
             result = (true, i)
@@ -1151,6 +1206,16 @@ proc parseMessage(tl: seq[Token], owner: string = "", level: int = 1): ParseStat
 
 
 # import = "import" [ "weak" | "public" ] strLit ";"
+
+proc fixupImport(s: string): (bool, string) =
+  let
+    dots = s.count(".")
+    valid = s.endsWith(".proto")
+  if valid and dots > 1:
+    let fragments = s.split(".")
+    result = (valid, joinPath(fragments[0..^2]).addFileExt(fragments[^1]))
+  else:
+    result = (valid, s)
 
 proc parseImport(tl: seq[Token]): (ParseStatus, ProtobufImport) =
   var
@@ -1171,7 +1236,10 @@ proc parseImport(tl: seq[Token]): (ParseStatus, ProtobufImport) =
       iname = tl[i].literal
       inc(i)
       if consume(tl[i] == tkSemi, ok, i):
-        result = ((true, i), (path: iname.replace("\"", ""), style: istyle))
+        let
+          name = iname.replace("\"", "")
+          (valid, pname) = name.fixupImport()
+        result = ((true, i), (name: name, path: pname, style: istyle, valid: valid))
 
 # package = "package" fullIdent ";"
 proc parsePackage(tl: seq[Token]): (ParseStatus, ProtobufPackage) =
@@ -1202,8 +1270,10 @@ proc parseSyntax(tl: seq[Token]): (ParseStatus, ProtobufSyntax) =
         let syntax = tl[i].literal
         inc(i)
         if consume(tl[i] == tkSemi, ok, i):
-          # echo "SYNTAX: " & syntax & ", good=" & $(syntax == "\"proto3\"")
-          result = ((true, i), syntax)
+          if syntax == "\"proto3\"":
+            result = ((true, i), (name: syntax.replace("\"", ""), valid: true))
+          else:
+            result = ((true, i), (name: syntax, valid: false))
 
 proc parseNumeric(parser: var Parser, loc: Location) : Token =
   var base = 10
